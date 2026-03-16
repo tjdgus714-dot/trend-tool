@@ -4,7 +4,7 @@ plotly
 pyyaml
 requests
 python-dotenv
-google-generativeai
+google-genai
 pytrends
 openpyxl
 naver-search-ad
