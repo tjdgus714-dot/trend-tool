@@ -1,0 +1,10 @@
+streamlit
+pandas
+plotly
+pyyaml
+requests
+python-dotenv
+google-generativeai
+pytrends
+openpyxl
+naver-search-ad
