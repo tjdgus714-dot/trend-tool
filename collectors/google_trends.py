@@ -4,7 +4,7 @@
 - 5개씩 배치 처리 + 429 자동 재시도
 """
 
-from pytrends.request import TrendReq
+from pytrends_modern import TrendReq
 import pandas as pd
 import time
 
@@ -38,8 +38,10 @@ def fetch_google_trends(
         timeframe = 'today 1-m'
     elif days <= 60:
         timeframe = 'today 2-m'
-    else:
+    elif days <= 90:
         timeframe = 'today 3-m'
+    else:
+        timeframe = 'today 6-m'
 
     # 5개씩 배치 (100개 → 20번 호출로 줄임)
     batches  = [clean_keywords[i:i+5] for i in range(0, len(clean_keywords), 5)]
@@ -83,7 +85,7 @@ def fetch_google_trends(
                     print(f"[WARN] 구글 트렌드 배치 실패: {e}")
                     break
 
-        time.sleep(2.0)  # 배치 간 기본 대기
+        time.sleep(6.0)  # 배치 간 기본 대기 (429 방지 — 20배치 기준 약 2분 소요)
 
     return pd.DataFrame(all_rows)
 
@@ -130,11 +132,6 @@ def merge_naver_google(
 def fetch_google_trending_kr() -> list:
     """
     구글 코리아 실시간 급상승 키워드 수집
+    (엔드포인트 변경으로 현재 비활성화)
     """
-    try:
-        pytrends = TrendReq(hl='ko-KR', tz=540, timeout=(10, 25))
-        df = pytrends.trending_searches(pn='south_korea')
-        return df[0].tolist()
-    except Exception as e:
-        print(f"[WARN] 구글 급상승 키워드 수집 실패: {e}")
-        return []
+    return []

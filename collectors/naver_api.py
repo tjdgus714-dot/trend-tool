@@ -159,7 +159,11 @@ def fetch_keyword_trend_batch(
         # API 과호출 방지 — 배치 사이 0.3초 대기
         time.sleep(0.3)
 
-    return pd.DataFrame(all_rows)
+    df = pd.DataFrame(all_rows)
+    if not df.empty:
+        last_date = df["날짜"].max()
+        df = df[df["날짜"] < last_date].reset_index(drop=True)
+    return df
 
 
 def fetch_shopping_insight(
@@ -201,7 +205,11 @@ def fetch_shopping_insight(
                     "클릭지수": item["ratio"],
                 })
 
-        return pd.DataFrame(rows)
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            last_date = df["날짜"].max()
+            df = df[df["날짜"] < last_date].reset_index(drop=True)
+        return df
 
     except requests.exceptions.RequestException as e:
         print(f"[ERROR] 쇼핑인사이트 수집 실패: {e}")
@@ -269,13 +277,24 @@ def fetch_all_data(
     batch_count = (len(keywords) + 4) // 5
 
     if progress_callback:
-        progress_callback(0.5, f"키워드 트렌드 수집 중... (총 {batch_count}번 API 호출)")
+        progress_callback(0.5, "API 쿨다운 중... (30초)")
+
+    import time as _time
+    _time.sleep(30)
+
+    if progress_callback:
+        progress_callback(0.55, f"키워드 트렌드 수집 중... (총 {batch_count}번 API 호출)")
 
     keyword_df = fetch_keyword_trend_batch(
         keywords  = keywords,
         days      = days,
         time_unit = time_unit,
     )
+
+    print("[INFO] 기본 수집 완료 — 네이버 API 쿨다운 30초 대기 중...")
+    if progress_callback:
+        progress_callback(0.65, "네이버 API 쿨다운 중... (30초)")
+    time.sleep(30)
 
     if progress_callback:
         progress_callback(1.0, "수집 완료!")
@@ -285,4 +304,172 @@ def fetch_all_data(
         "keyword_df":  keyword_df,
         "keywords":    keywords,
         "batch_count": batch_count,
+    }
+
+def fetch_yoy_comparison(
+    keywords: list,
+    days: int = 90,
+    time_unit: str = "week",
+) -> pd.DataFrame:
+    """
+    전년 동기 대비 비교
+    올해 vs 작년 같은 기간 키워드 트렌드 수집
+    반환: 키워드별 올해평균/작년평균/YoY증감율 DataFrame
+    """
+    url = "https://openapi.naver.com/v1/datalab/search"
+
+    # 올해 기간
+    end_this   = datetime.today()
+    start_this = end_this - timedelta(days=days)
+
+    # 작년 같은 기간
+    end_last   = end_this - timedelta(days=365)
+    start_last = start_this - timedelta(days=365)
+
+    results = {}
+
+    for label, start_date, end_date in [
+        ("올해", start_this.strftime("%Y-%m-%d"), end_this.strftime("%Y-%m-%d")),
+        ("작년", start_last.strftime("%Y-%m-%d"), end_last.strftime("%Y-%m-%d")),
+    ]:
+        batches = [keywords[i:i+5] for i in range(0, len(keywords), 5)]
+
+        for batch in batches:
+            keyword_groups = [{"groupName": kw, "keywords": [kw]} for kw in batch]
+            body = {
+                "startDate":     start_date,
+                "endDate":       end_date,
+                "timeUnit":      time_unit,
+                "keywordGroups": keyword_groups,
+                "device":        "",
+                "gender":        "",
+                "ages":          [],
+            }
+
+            try:
+                r = requests.post(url, json=body, headers=HEADERS, timeout=10)
+                r.raise_for_status()
+                data = r.json()
+
+                for result in data.get("results", []):
+                    kw = result["title"]
+                    vals = [item["ratio"] for item in result.get("data", [])]
+                    avg = round(sum(vals) / len(vals), 1) if vals else 0
+                    if kw not in results:
+                        results[kw] = {}
+                    results[kw][label] = avg
+
+            except Exception as e:
+                print(f"[WARN] YoY 배치 실패: {e}")
+
+            time.sleep(1.0)
+
+    rows = []
+    for kw, vals in results.items():
+        this_val = vals.get("올해", 0)
+        last_val = vals.get("작년", 0)
+        if last_val and last_val != 0:
+            yoy = round((this_val - last_val) / last_val * 100, 1)
+        else:
+            yoy = None
+        rows.append({
+            "키워드":   kw,
+            "올해평균": this_val,
+            "작년평균": last_val,
+            "YoY증감율": yoy,
+        })
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values("YoY증감율", ascending=False, na_position='last').reset_index(drop=True)
+
+    return df
+
+def fetch_gender_age_trend(
+    keywords: list,
+    days: int = 90,
+    time_unit: str = "week",
+    progress_callback=None,
+) -> dict:
+    """
+    성별/연령별 키워드 트렌드 수집
+    반환: {"gender_df": DataFrame, "age_df": DataFrame}
+    """
+    url        = "https://openapi.naver.com/v1/datalab/search"
+    start_date, end_date = get_date_range(days)
+    batches    = [keywords[i:i+5] for i in range(0, len(keywords), 5)]
+    total      = len(batches)
+
+    # ── 성별 수집 ──────────────────────────────
+    gender_rows = []
+    for gender_code, gender_name in [("m", "남성"), ("f", "여성")]:
+        for idx, batch in enumerate(batches):
+            if progress_callback:
+                progress_callback(
+                    idx / total,
+                    f"성별 트렌드 수집 중... ({gender_name} {idx+1}/{total})"
+                )
+            keyword_groups = [{"groupName": kw, "keywords": [kw]} for kw in batch]
+            body = {
+                "startDate":     start_date,
+                "endDate":       end_date,
+                "timeUnit":      time_unit,
+                "keywordGroups": keyword_groups,
+                "device":        "",
+                "gender":        gender_code,
+                "ages":          [],
+            }
+            try:
+                r = requests.post(url, json=body, headers=HEADERS, timeout=10)
+                r.raise_for_status()
+                for result in r.json().get("results", []):
+                    kw_name = result["title"]
+                    vals    = [item["ratio"] for item in result.get("data", [])]
+                    avg     = round(sum(vals) / len(vals), 1) if vals else 0
+                    gender_rows.append({"키워드": kw_name, "성별": gender_name, "검색지수": avg})
+            except Exception as e:
+                print(f"[WARN] 성별 배치 실패 ({gender_name}): {e}")
+            time.sleep(1.5)
+
+    # ── 연령별 수집 (5구간으로 묶음) ───────────
+    age_groups = [
+        (["2"],       "10대"),
+        (["3", "4"],  "20대"),
+        (["5", "6"],  "30대"),
+        (["7"],       "40대"),
+        (["8"],       "50대이상"),
+    ]
+    age_rows = []
+    for age_codes, age_name in age_groups:
+        for idx, batch in enumerate(batches):
+            if progress_callback:
+                progress_callback(
+                    idx / total,
+                    f"연령별 트렌드 수집 중... ({age_name} {idx+1}/{total})"
+                )
+            keyword_groups = [{"groupName": kw, "keywords": [kw]} for kw in batch]
+            body = {
+                "startDate":     start_date,
+                "endDate":       end_date,
+                "timeUnit":      time_unit,
+                "keywordGroups": keyword_groups,
+                "device":        "",
+                "gender":        "",
+                "ages":          age_codes,
+            }
+            try:
+                r = requests.post(url, json=body, headers=HEADERS, timeout=10)
+                r.raise_for_status()
+                for result in r.json().get("results", []):
+                    kw_name = result["title"]
+                    vals    = [item["ratio"] for item in result.get("data", [])]
+                    avg     = round(sum(vals) / len(vals), 1) if vals else 0
+                    age_rows.append({"키워드": kw_name, "연령대": age_name, "검색지수": avg})
+            except Exception as e:
+                print(f"[WARN] 연령 배치 실패 ({age_name}): {e}")
+            time.sleep(1.5)
+
+    return {
+        "gender_df": pd.DataFrame(gender_rows),
+        "age_df":    pd.DataFrame(age_rows),
     }
